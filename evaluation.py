@@ -1,94 +1,74 @@
-"""Evaluation script for HybridBot PPO checkpoints.
-
-The evaluation pipeline loads a saved PPO model and runs matches against different
-opponents: self-play mirrors, the scripted HybridBot baseline, and the built-in Psyonix
-bots.  Metrics such as goals scored, saves, ball touches and win rate are logged to provide
-insight into progress over time.
-"""
+"""Evaluation utilities for tracking SuperBot performance."""
 from __future__ import annotations
 
-import argparse
-from dataclasses import dataclass
+import json
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict
 
-import numpy as np
-from stable_baselines3 import PPO
-
-from training import TrainingConfig, build_vec_env
+from rlbot import runner
 
 
 @dataclass
-class EvaluationResult:
-    """Container summarizing metrics from evaluation matches."""
-
+class MatchResult:
+    wins: int = 0
+    losses: int = 0
+    draws: int = 0
     goals_scored: int = 0
     goals_conceded: int = 0
+    shots: int = 0
     saves: int = 0
-    touches: int = 0
-    wins: int = 0
-    matches: int = 0
 
-    def record(self, info: Dict[str, float]) -> None:
-        self.goals_scored += int(info.get("goals_scored", 0))
-        self.goals_conceded += int(info.get("goals_conceded", 0))
-        self.saves += int(info.get("saves", 0))
-        self.touches += int(info.get("touches", 0))
-        self.wins += int(info.get("win", 0))
-        self.matches += 1
+    def record_game(self, score_difference: int, goals_for: int, goals_against: int, shots: int, saves: int) -> None:
+        if score_difference > 0:
+            self.wins += 1
+        elif score_difference < 0:
+            self.losses += 1
+        else:
+            self.draws += 1
+        self.goals_scored += goals_for
+        self.goals_conceded += goals_against
+        self.shots += shots
+        self.saves += saves
 
-    def summary(self) -> str:
-        if self.matches == 0:
-            return "No matches played"
-        win_rate = 100.0 * self.wins / self.matches
-        return (
-            f"Matches: {self.matches}\n"
-            f"Goals scored: {self.goals_scored}\n"
-            f"Goals conceded: {self.goals_conceded}\n"
-            f"Saves: {self.saves}\n"
-            f"Touches: {self.touches}\n"
-            f"Win rate: {win_rate:.1f}%"
-        )
-
-
-def evaluate_against(model: PPO, opponent_mode: str, episodes: int) -> EvaluationResult:
-    """Run evaluation episodes against a specified opponent mode."""
-
-    config = TrainingConfig(num_envs=1, opponent_mode=opponent_mode)
-    env = build_vec_env(config)
-    result = EvaluationResult()
-    for _ in range(episodes):
-        obs = env.reset()
-        done = False
-        info = {}
-        while not done:
-            action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, info = env.step(action)
-        if isinstance(info, list):
-            info = info[0]
-        result.record(info if isinstance(info, dict) else {})
-    env.close()
-    return result
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "wins": self.wins,
+            "losses": self.losses,
+            "draws": self.draws,
+            "goals_scored": self.goals_scored,
+            "goals_conceded": self.goals_conceded,
+            "shots": self.shots,
+            "saves": self.saves,
+        }
 
 
-def print_section(title: str, result: EvaluationResult) -> None:
-    print("=" * 60)
-    print(title)
-    print(result.summary())
+@dataclass
+class EvaluationHarness:
+    """Batch evaluation driver using rlbot-runner."""
 
+    config_path: Path
+    matches: int = 5
+    wait_time: float = 3.0
+    results: MatchResult = field(default_factory=MatchResult)
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Evaluate HybridBot PPO checkpoints")
-    parser.add_argument("--model", type=Path, required=True, help="Path to PPO checkpoint")
-    parser.add_argument("--episodes", type=int, default=5)
-    args = parser.parse_args()
+    def run(self) -> MatchResult:
+        for _ in range(self.matches):
+            print(f"Starting evaluation match using {self.config_path}")
+            runner.main(["--config", str(self.config_path)])
+            summary_path = self.config_path.with_name("match_summary.json")
+            if summary_path.exists():
+                summary = json.loads(summary_path.read_text())
+                self.results.record_game(
+                    score_difference=int(summary.get("score_difference", 0)),
+                    goals_for=int(summary.get("goals_for", 0)),
+                    goals_against=int(summary.get("goals_against", 0)),
+                    shots=int(summary.get("shots", 0)),
+                    saves=int(summary.get("saves", 0)),
+                )
+            time.sleep(self.wait_time)
+        return self.results
 
-    model = PPO.load(args.model)
-
-    print_section("Self-play mirror", evaluate_against(model, "self", args.episodes))
-    print_section("Scripted HybridBot", evaluate_against(model, "scripted", args.episodes))
-    print_section("Psyonix baseline", evaluate_against(model, "none", args.episodes))
-
-
-if __name__ == "__main__":
-    main()
+    def save(self, destination: Path) -> None:
+        destination.write_text(json.dumps(self.results.as_dict(), indent=2))

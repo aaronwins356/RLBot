@@ -1,47 +1,47 @@
+"""Orientation helpers derived from RLBot physics rotations."""
+from __future__ import annotations
+
 import math
+from dataclasses import dataclass
 
-from util.vec import Vec3
+from rlbot.utils.structures.game_data_struct import Rotator
+
+from vec import Vec3
 
 
-# This is a helper class for calculating directions relative to your car. You can extend it or delete if you want.
+@dataclass(frozen=True)
 class Orientation:
-    """
-    This class describes the orientation of an object from the rotation of the object.
-    Use this to find the direction of cars: forward, right, up.
-    It can also be used to find relative locations.
-    """
+    """Forward/right/up vectors derived from a ``Rotator``."""
 
-    def __init__(self, rotation):
-        self.yaw = float(rotation.yaw)
-        self.roll = float(rotation.roll)
-        self.pitch = float(rotation.pitch)
+    forward: Vec3
+    right: Vec3
+    up: Vec3
 
-        cr = math.cos(self.roll)
-        sr = math.sin(self.roll)
-        cp = math.cos(self.pitch)
-        sp = math.sin(self.pitch)
-        cy = math.cos(self.yaw)
-        sy = math.sin(self.yaw)
+    @classmethod
+    def from_rotator(cls, rotation: Rotator) -> "Orientation":
+        pitch = float(rotation.pitch)
+        yaw = float(rotation.yaw)
+        roll = float(rotation.roll)
 
-        self.forward = Vec3(cp * cy, cp * sy, sp)
-        self.right = Vec3(cy*sp*sr-cr*sy, sy*sp*sr+cr*cy, -cp*sr)
-        self.up = Vec3(-cr*cy*sp-sr*sy, -cr*sy*sp+sr*cy, cp*cr)
+        cp = math.cos(pitch)
+        sp = math.sin(pitch)
+        cy = math.cos(yaw)
+        sy = math.sin(yaw)
+        cr = math.cos(roll)
+        sr = math.sin(roll)
+
+        forward = Vec3(cp * cy, cp * sy, sp)
+        right = Vec3(sy * sp * sr + cr * cy, -cy * sp * sr + cr * sy, -cp * sr)
+        up = Vec3(-cr * cy * sp - sr * sy, -cr * sy * sp + sr * cy, cp * cr)
+        return cls(forward=forward, right=right, up=up)
 
 
-# Sometimes things are easier, when everything is seen from your point of view.
-# This function lets you make any location the center of the world.
-# For example, set center to your car's location and ori to your car's orientation, then the target will be
-# relative to your car!
-def relative_location(center: Vec3, ori: Orientation, target: Vec3) -> Vec3:
-    """
-    Returns target as a relative location from center's point of view, using the given orientation. The components of
-    the returned vector describes:
+def relative_location(origin: Vec3, orientation: Orientation, target: Vec3) -> Vec3:
+    """Return ``target`` relative to ``origin`` in car coordinates."""
 
-    * x: how far in front
-    * y: how far right
-    * z: how far above
-    """
-    x = (target - center).dot(ori.forward)
-    y = (target - center).dot(ori.right)
-    z = (target - center).dot(ori.up)
-    return Vec3(x, y, z)
+    offset = target - origin
+    return Vec3(
+        offset.dot(orientation.forward),
+        offset.dot(orientation.right),
+        offset.dot(orientation.up),
+    )

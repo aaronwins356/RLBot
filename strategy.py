@@ -1,206 +1,233 @@
-"""High-level strategy and decision-making for the HybridBot.
-
-This module orchestrates the selection of offensive, defensive and neutral maneuvers
-using both scripted heuristics and reinforcement learning predictions.  The code is
-intentionally documented in depth to explain the reasoning process behind each decision.
-
-The strategy layer operates on a *GameContext* abstraction that bundles together the
-current car state, ball state, teammate/foe snapshots, and configuration flags.  The
-functions in this module never directly manipulate ``SimpleControllerState``.  Instead,
-they return symbolic decisions such as ``AttackDecision`` or ``RetreatDecision`` which the
-controller layer translates into concrete mechanics.
-"""
+"""High-level decision making for SuperBot."""
 from __future__ import annotations
 
+import enum
 import math
-import random
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional
 
-import numpy as np
 from rlbot.agents.base_agent import SimpleControllerState
+from rlbot.utils.structures.game_data_struct import GameTickPacket, PlayerInfo
 
+from drive import DriveTarget, simple_drive
 from mechanics import (
-    BallState,
-    CarState,
-    ControlResult,
-    aerial_controller,
+    MechanicContext,
+    ceiling_shot,
+    demo_run,
+    fake_challenge,
+    flip_reset,
     ground_dribble,
-    half_flip_recovery,
-    shooting_alignment,
+    psycho_shot,
+    shadow_defense,
+    wave_dash,
 )
+from vec import Vec3
 
-# Constants describing field geometry and physical tolerances.  These values mirror the
-# dimensions provided by RLGym and RLBot.
-FIELD_LENGTH: float = 10280.0
-FIELD_WIDTH: float = 8240.0
-FIELD_HEIGHT: float = 2044.0
-BLUE_GOAL = np.array([0.0, -FIELD_LENGTH / 2, 0.0])
-ORANGE_GOAL = np.array([0.0, FIELD_LENGTH / 2, 0.0])
+FIELD_LENGTH = 10280.0
+FIELD_WIDTH = 8240.0
+BLUE_GOAL = Vec3(0.0, -FIELD_LENGTH / 2, 0.0)
+ORANGE_GOAL = Vec3(0.0, FIELD_LENGTH / 2, 0.0)
 
 
-def normalize(vec: np.ndarray) -> np.ndarray:
-    magnitude = float(np.linalg.norm(vec))
-    if magnitude < 1e-6:
-        return np.zeros_like(vec)
-    return vec / magnitude
-
-
-@dataclass
-class PlayerInfo:
-    """Representation of another player in the match."""
-
-    position: np.ndarray
-    velocity: np.ndarray
-    is_teammate: bool
+class Intent(enum.IntEnum):
+    ATTACK = 0
+    DEFEND = 1
+    ROTATE = 2
+    BOOST = 3
+    PRESSURE = 4
+    DEMO = 5
+    MECHANICAL_FLEX = 6
 
 
 @dataclass
-class GameContext:
-    """Container bundling together everything the strategy needs."""
+class StrategyContext:
+    """Bundle of match information used for decision making."""
 
-    car: CarState
-    ball: BallState
-    players: List[PlayerInfo]
-    rand: random.Random
+    packet: GameTickPacket
+    me: PlayerInfo
+    index: int
     is_orange: bool
-    ml_action: Optional[int]
-    use_ml: bool
+    teammates: list[PlayerInfo]
+    opponents: list[PlayerInfo]
+    last_rl_action: Optional[int]
 
     @property
-    def own_goal(self) -> np.ndarray:
+    def own_goal(self) -> Vec3:
         return ORANGE_GOAL if self.is_orange else BLUE_GOAL
 
     @property
-    def opponent_goal(self) -> np.ndarray:
+    def opponent_goal(self) -> Vec3:
         return BLUE_GOAL if self.is_orange else ORANGE_GOAL
 
 
 @dataclass
-class StrategyDecision:
-    """High-level decision object returned by the strategy layer."""
-
+class StrategyOutput:
+    controls: SimpleControllerState
     description: str
-    controller: ControlResult
 
 
-def choose_strategy(context: GameContext) -> StrategyDecision:
-    """Select an overall plan for the current tick."""
+class DiamondStrategy:
+    """Deterministic Diamond-level baseline behaviour."""
 
-    if context.use_ml and context.ml_action is not None:
-        intent = context.ml_action
-        intent_description = f"PPO policy selected intent index {intent}."
-    else:
-        intent, intent_description = scripted_intent(context)
+    def select_intent(self, context: StrategyContext) -> Intent:
+        me = context.me
+        ball = context.packet.game_ball
+        my_pos = Vec3.from_iterable((me.physics.location.x, me.physics.location.y, me.physics.location.z))
+        ball_pos = Vec3.from_iterable((ball.physics.location.x, ball.physics.location.y, ball.physics.location.z))
+        ball_vel_y = ball.physics.velocity.y
 
-    if intent == 0:
-        controller = execute_attack(context)
-    elif intent == 1:
-        controller = execute_defense(context)
-    elif intent == 2:
-        controller = execute_rotation(context)
-    elif intent == 3:
-        controller = execute_boost_run(context)
-    else:
-        controller = execute_neutral(context)
+        # Kickoff detection.
+        if context.packet.game_info.is_kickoff_pause:
+            return Intent.PRESSURE
 
-    description = f"{intent_description} -> {controller.description}"
-    return StrategyDecision(description=description, controller=controller)
+        # Low boost? go refuel unless goal threatened.
+        threatening = self._is_shot_threatening(context)
+        if me.boost < 30 and not threatening:
+            return Intent.BOOST
+
+        if threatening:
+            return Intent.DEFEND
+
+        distance_to_ball = my_pos.distance(ball_pos)
+        closest_teammate = min(
+            (my_pos.distance(Vec3.from_iterable((tm.physics.location.x, tm.physics.location.y, tm.physics.location.z))) for tm in context.teammates),
+            default=9e9,
+        )
+        if distance_to_ball < closest_teammate + 200:
+            if abs(ball_vel_y) > 1200 and ball.physics.location.z > 600:
+                return Intent.MECHANICAL_FLEX
+            return Intent.ATTACK
+
+        if me.boost > 60 and context.opponents:
+            return Intent.DEMO
+
+        return Intent.ROTATE
+
+    def execute(self, context: StrategyContext, intent: Intent) -> StrategyOutput:
+        mapping = {
+            Intent.ATTACK: self._attack,
+            Intent.DEFEND: self._defend,
+            Intent.ROTATE: self._rotate,
+            Intent.BOOST: self._boost_run,
+            Intent.PRESSURE: self._kickoff,
+            Intent.DEMO: self._demo,
+            Intent.MECHANICAL_FLEX: self._mechanical_flex,
+        }
+        handler = mapping[intent]
+        controls, description = handler(context)
+        return StrategyOutput(controls=controls, description=description)
+
+    # ------------------------------------------------------------------
+    # Intent execution
+    # ------------------------------------------------------------------
+
+    def _attack(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        me = context.me
+        ball = context.packet.game_ball
+        mech_context = MechanicContext(car=me, ball=ball, dt=context.packet.game_info.delta_time)
+
+        for routine in (flip_reset, ceiling_shot, ground_dribble):
+            plan = routine(mech_context)
+            if plan:
+                return plan.controls, plan.description
+
+        target = DriveTarget(position=Vec3.from_iterable((ball.physics.location.x, ball.physics.location.y, ball.physics.location.z)), arrive_speed=1800)
+        controls = simple_drive(me, target)
+        controls.handbrake = False
+        return controls, "Attack: pressure ball"
+
+    def _defend(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        mech_context = MechanicContext(car=context.me, ball=context.packet.game_ball, dt=context.packet.game_info.delta_time)
+        plan = shadow_defense(mech_context, context.own_goal)
+        return plan.controls, plan.description
+
+    def _rotate(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        me = context.me
+        sign = -1 if context.is_orange else 1
+        rotation_point = Vec3(1800 * sign, context.own_goal.y + (1200 * sign), 0.0)
+        target = DriveTarget(position=rotation_point, arrive_speed=1600, boost_ok=False)
+        controls = simple_drive(me, target)
+        controls.handbrake = False
+        return controls, "Rotate back post"
+
+    def _boost_run(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        pad = self._nearest_large_boost(context.me)
+        target = DriveTarget(position=pad, arrive_speed=2000)
+        controls = simple_drive(context.me, target)
+        controls.boost = True
+        return controls, "Collecting boost"
+
+    def _kickoff(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        me = context.me
+        ball = context.packet.game_ball
+        target = DriveTarget(position=Vec3.from_iterable((ball.physics.location.x, ball.physics.location.y, ball.physics.location.z)), arrive_speed=2300)
+        controls = simple_drive(me, target)
+        if context.packet.game_info.seconds_elapsed % 1.5 > 1.0:
+            controls.jump = True
+            controls.pitch = -1.0
+        return controls, "Kickoff charge"
+
+    def _demo(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        mech_context = MechanicContext(car=context.me, ball=context.packet.game_ball, dt=context.packet.game_info.delta_time)
+        target = min(
+            context.opponents,
+            key=lambda opp: mech_context.car_position.distance(
+                Vec3.from_iterable((opp.physics.location.x, opp.physics.location.y, opp.physics.location.z))
+            ),
+        )
+        plan = demo_run(mech_context, target)
+        return plan.controls, plan.description
+
+    def _mechanical_flex(self, context: StrategyContext) -> tuple[SimpleControllerState, str]:
+        mech_context = MechanicContext(car=context.me, ball=context.packet.game_ball, dt=context.packet.game_info.delta_time)
+        for routine in (psycho_shot, flip_reset, wave_dash):
+            plan = routine(mech_context)
+            if plan:
+                return plan.controls, plan.description
+        fake = fake_challenge(mech_context)
+        return fake.controls, fake.description
+
+    # ------------------------------------------------------------------
+    # Utility helpers
+    # ------------------------------------------------------------------
+
+    def _is_shot_threatening(self, context: StrategyContext) -> bool:
+        ball = context.packet.game_ball
+        goal_y = ORANGE_GOAL.y if context.is_orange else BLUE_GOAL.y
+        return abs(ball.physics.location.x) < 2500 and (ball.physics.location.y - goal_y) * (-1 if context.is_orange else 1) < 1400
+
+    def _nearest_large_boost(self, player: PlayerInfo) -> Vec3:
+        pads = [
+            Vec3(-3072, -4096, 0),
+            Vec3(3072, -4096, 0),
+            Vec3(-3072, 4096, 0),
+            Vec3(3072, 4096, 0),
+            Vec3(0, -4240, 0),
+            Vec3(0, 4240, 0),
+        ]
+        my_pos = Vec3.from_iterable((player.physics.location.x, player.physics.location.y, player.physics.location.z))
+        return min(pads, key=my_pos.distance)
 
 
-# -----------------------------------------------------------------------------
-# Scripted intent heuristics used before the model is trained.
-# -----------------------------------------------------------------------------
+def rl_action_to_intent(action: Optional[int]) -> Optional[Intent]:
+    if action is None:
+        return None
+    try:
+        return Intent(action)
+    except ValueError:
+        return None
 
 
-def scripted_intent(context: GameContext) -> Tuple[int, str]:
-    car = context.car
-    ball = context.ball
-    to_ball = ball.position - car.position
-    distance_to_ball = float(np.linalg.norm(to_ball))
-
-    goal_to_ball = ball.position - context.own_goal
-    defensive_threat = float(np.linalg.norm(goal_to_ball))
-
-    if car.boost < 20.0:
-        return 3, "Low boost -> collect boost pads"
-
-    if defensive_threat < 3000.0 and ball.position[2] < 800.0:
-        return 1, "Ball near own goal -> defend"
-
-    if distance_to_ball < 1600.0:
-        return 0, "Close to ball -> attack"
-
-    if car.velocity[1] * (1 if context.is_orange else -1) < -400.0:
-        return 2, "Moving backward -> rotate"
-
-    return 4, "Default -> neutral support"
-
-
-# -----------------------------------------------------------------------------
-# Intent execution functions
-# -----------------------------------------------------------------------------
-
-
-def execute_attack(context: GameContext) -> ControlResult:
-    car = context.car
-    ball = context.ball
-
-    aerial = aerial_controller(car, ball)
-    if aerial:
-        return aerial
-
-    dribble = ground_dribble(car, ball)
-    if dribble:
-        return dribble
-
-    align = shooting_alignment(car, ball, context.opponent_goal)
-    if align:
-        return align
-
-    return drive_toward(car, ball.position, 1.0, "Attack: accelerate toward ball")
-
-
-def execute_defense(context: GameContext) -> ControlResult:
-    car = context.car
-
-    desired_forward = normalize(context.own_goal - car.position)
-    half_flip = half_flip_recovery(car, desired_forward)
-    if half_flip:
-        return half_flip
-
-    return drive_toward(car, context.own_goal, 1.0, "Defense: retreat and challenge")
-
-
-def execute_rotation(context: GameContext) -> ControlResult:
-    car = context.car
-    rotation_point = (context.own_goal + context.opponent_goal) / 2
-    return drive_toward(car, rotation_point, 0.8, "Rotation: moving through midfield")
-
-
-def execute_boost_run(context: GameContext) -> ControlResult:
-    target = np.array([0.0, -3500.0 if context.is_orange else 3500.0, 0.0])
-    return drive_toward(context.car, target, 1.0, "Boost run: heading toward boost pad")
-
-
-def execute_neutral(context: GameContext) -> ControlResult:
-    aim_point = np.array([0.0, 0.0, 0.0])
-    return drive_toward(context.car, aim_point, 0.5, "Neutral: holding midfield")
-
-
-def drive_toward(car: CarState, target: np.ndarray, throttle: float, description: str) -> ControlResult:
-    controller = SimpleControllerState()
-    controller.throttle = float(np.clip(throttle, -1.0, 1.0))
-    desired_direction = normalize(target - car.position)
-    steer_sign = float(np.clip(np.cross(car.forward, desired_direction)[2], -1.0, 1.0))
-    controller.steer = steer_sign
-    controller.handbrake = abs(steer_sign) > 0.6
-    return ControlResult(controller=controller, description=description)
-
-
-__all__ = [
-    "PlayerInfo",
-    "GameContext",
-    "StrategyDecision",
-    "choose_strategy",
-]
+def build_context(packet: GameTickPacket, index: int, last_rl_action: Optional[int] = None) -> StrategyContext:
+    me = packet.game_cars[index]
+    teammates = [packet.game_cars[i] for i in range(packet.num_cars) if packet.game_cars[i].team == me.team and i != index]
+    opponents = [packet.game_cars[i] for i in range(packet.num_cars) if packet.game_cars[i].team != me.team]
+    return StrategyContext(
+        packet=packet,
+        me=me,
+        index=index,
+        is_orange=bool(me.team),
+        teammates=teammates,
+        opponents=opponents,
+        last_rl_action=last_rl_action,
+    )
