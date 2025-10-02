@@ -3,13 +3,23 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import Deque, Dict, List, Optional
 
 import numpy as np
 
-from rl_components import ImitationDataset, ImitationExample, PolicyFactory, PolicyManager, ReplayBuffer, Transition, default_dqn_factory, train_imitation
+from rl_components import (
+    ImitationDataset,
+    ImitationExample,
+    PolicyFactory,
+    PolicyManager,
+    ReplayBuffer,
+    Transition,
+    default_dqn_factory,
+    train_imitation,
+)
 
 
 @dataclass
@@ -25,10 +35,75 @@ class TrainingConfig:
     checkpoint_dir: Path = Path("models")
     imitation_replays: Optional[Path] = None
     use_subprocess_env: bool = False
+    reaction_ticks: int = 8  # ~120ms at 120Hz
+    cache_ticks: tuple[int, int] = (2, 4)
+    exploration_noise: float = 0.05
+    curriculum_stages: tuple[int, int] = (150, 350)
 
 
 def linear_schedule(start: float, end: float, step: float) -> float:
     return max(end, start * step)
+
+
+@dataclass
+class ActionAugmentor:
+    """Simulate human limitations by delaying and caching inputs."""
+
+    action_dim: int
+    reaction_ticks: int
+    cache_ticks: tuple[int, int]
+    exploration_noise: float
+    queue: Deque[int] = field(default_factory=deque)
+    cache_timer: int = 0
+    cached_action: Optional[int] = None
+
+    def process(self, action: int, rng: np.random.Generator) -> int:
+        if rng.random() < self.exploration_noise:
+            action = int(rng.integers(0, self.action_dim))
+
+        self.queue.append(action)
+        if len(self.queue) > self.reaction_ticks:
+            delayed = self.queue.popleft()
+        else:
+            delayed = self.queue[0]
+
+        if self.cache_timer <= 0 or self.cached_action is None:
+            low, high = self.cache_ticks
+            self.cache_timer = int(rng.integers(low, high + 1))
+            self.cached_action = delayed
+        else:
+            self.cache_timer -= 1
+        return int(self.cached_action)
+
+
+@dataclass
+class MechanicsTutor:
+    """Collect labelled examples for advanced mechanics."""
+
+    buffer: ReplayBuffer
+    mechanic_actions: Dict[str, int]
+    success_threshold: float = 1.0
+
+    def observe(
+        self,
+        state: np.ndarray,
+        action: int,
+        reward: float,
+        next_state: np.ndarray,
+        done: bool,
+    ) -> None:
+        if action not in self.mechanic_actions.values():
+            return
+        shaped_reward = 2.0 if reward >= self.success_threshold else -0.5
+        self.buffer.push(
+            Transition(
+                state=state,
+                action=action,
+                reward=shaped_reward,
+                next_state=next_state,
+                done=done,
+            )
+        )
 
 
 def load_imitation_examples(replay_dir: Path) -> List[ImitationExample]:
@@ -47,15 +122,19 @@ def load_imitation_examples(replay_dir: Path) -> List[ImitationExample]:
 def train(config: TrainingConfig, policy_factory: PolicyFactory = default_dqn_factory()) -> None:
     from rlgym.envs import Match
     from rlgym.gym import Gym
-    from rlgym.utils.obs_builders.default import DefaultObs
     from rlgym.utils.action_parsers.default_act import DefaultAction
+    from rlgym.utils.obs_builders.default import DefaultObs
     from rlgym.utils.reward_functions.common_rewards import LiuDistancePlayerToBallReward
+    from rlgym.utils.state_setters import DefaultState
+    from rlgym.utils.state_setters.aerial_state import AerialState
+    from rlgym.utils.state_setters.dribble_state import DribbleState
 
     match = Match(
         team_size=1,
         obs_builder=DefaultObs(),
         action_parser=DefaultAction(),
         reward_function=LiuDistancePlayerToBallReward(),
+        state_setter=DribbleState(),
     )
     env = Gym(match=match, self_play=True, team_size=1)
 
@@ -65,8 +144,23 @@ def train(config: TrainingConfig, policy_factory: PolicyFactory = default_dqn_fa
 
     policy: PolicyManager = policy_factory.build(state_dim, action_dim)
     buffer = ReplayBuffer(capacity=200_000)
+    tutor = MechanicsTutor(
+        buffer=buffer,
+        mechanic_actions={
+            "flip_reset": min(action_dim - 1, 6),
+            "psycho": min(action_dim - 1, 7),
+        },
+    )
 
     epsilon = config.epsilon_start
+    rng = np.random.default_rng()
+    augmentor = ActionAugmentor(
+        action_dim=action_dim,
+        reaction_ticks=config.reaction_ticks,
+        cache_ticks=config.cache_ticks,
+        exploration_noise=config.exploration_noise,
+    )
+
     if config.imitation_replays and config.imitation_replays.exists():
         examples = load_imitation_examples(config.imitation_replays)
         if examples:
@@ -75,17 +169,35 @@ def train(config: TrainingConfig, policy_factory: PolicyFactory = default_dqn_fa
             train_imitation(policy, dataset, epochs=10)
 
     for episode in range(config.episodes):
+        # Curriculum scheduling across the three stages described in the docs.
+        if episode < config.curriculum_stages[0]:
+            match.state_setter = DribbleState()
+        elif episode < config.curriculum_stages[1]:
+            match.state_setter = AerialState()
+        else:
+            match.state_setter = DefaultState()
+
         state = np.asarray(env.reset(), dtype=np.float32)
         episode_reward = 0.0
         for step in range(config.steps_per_episode):
             action = policy.select_action(state, epsilon)
-            next_state, reward, done, _ = env.step(action)
+            delayed_action = augmentor.process(action, rng)
+            next_state, reward, done, _ = env.step(delayed_action)
             next_state = np.asarray(next_state, dtype=np.float32)
-            buffer.push(Transition(state=state, action=action, reward=float(reward), next_state=next_state, done=done))
+            buffer.push(
+                Transition(
+                    state=state,
+                    action=delayed_action,
+                    reward=float(reward),
+                    next_state=next_state,
+                    done=done,
+                )
+            )
+            tutor.observe(state, delayed_action, float(reward), next_state, done)
             state = next_state
             episode_reward += reward
             if len(buffer) > config.warmup:
-                loss = policy.optimize(buffer, batch_size=config.batch_size, gamma=config.gamma)
+                policy.optimize(buffer, batch_size=config.batch_size, gamma=config.gamma)
             if done:
                 break
 
@@ -119,3 +231,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
