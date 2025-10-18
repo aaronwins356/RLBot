@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Sequence
 
 import numpy as np
 from rlbot.agents.base_agent import BaseAgent, SimpleControllerState
@@ -8,6 +8,7 @@ from rlbot.utils.structures.game_data_struct import GameTickPacket
 
 from agent import Agent
 from util.game_state import GameState
+from your_act import ACTION_SIZE
 
 
 class PhoenixBot(BaseAgent):
@@ -62,18 +63,32 @@ class PhoenixBot(BaseAgent):
     # ------------------------------------------------------------------
     # Helpers
 
-    def _apply_controls(self, action: np.ndarray) -> None:
-        if action.size != 8:
-            action = np.resize(action, 8)
+    def _apply_controls(self, action: np.ndarray | Sequence[float]) -> None:
+        normalized = self._normalize_action(action)
 
-        self.controls.throttle = float(np.clip(action[0], -1.0, 1.0))
-        self.controls.steer = float(np.clip(action[1], -1.0, 1.0))
-        self.controls.pitch = float(np.clip(action[2], -1.0, 1.0))
-        self.controls.yaw = float(np.clip(action[3], -1.0, 1.0))
-        self.controls.roll = float(np.clip(action[4], -1.0, 1.0))
-        self.controls.jump = bool(action[5] > 0.5)
-        self.controls.boost = bool(action[6] > 0.5)
-        self.controls.handbrake = bool(action[7] > 0.5)
+        self.controls.throttle = float(normalized[0])
+        self.controls.steer = float(normalized[1])
+        self.controls.pitch = float(normalized[2])
+        self.controls.yaw = float(normalized[3])
+        self.controls.roll = float(normalized[4])
+        self.controls.jump = bool(normalized[5] > 0.5)
+        self.controls.boost = bool(normalized[6] > 0.5)
+        self.controls.handbrake = bool(normalized[7] > 0.5)
+
+    def _normalize_action(self, action: np.ndarray | Sequence[float] | None) -> np.ndarray:
+        if isinstance(action, np.ndarray):
+            arr = np.asarray(action, dtype=np.float32).flatten()
+        else:
+            arr = np.asarray(action if action is not None else (), dtype=np.float32).flatten()
+
+        if arr.size < ACTION_SIZE:
+            padded = np.zeros(ACTION_SIZE, dtype=np.float32)
+            padded[: arr.size] = arr
+        else:
+            padded = arr[:ACTION_SIZE]
+
+        clipped = np.clip(padded, -1.0, 1.0)
+        return clipped
 
 
 # RLBot expects a ``Bot`` class at module scope.
