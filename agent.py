@@ -39,12 +39,12 @@ class Agent:
     # Public API
 
     def act(self, context: Optional[Dict[str, Any]]) -> np.ndarray:
-        if not context:
+        if not isinstance(context, dict) or not context:
             return self._controls.neutral()
 
         state: GameState = context.get("state")
         player: PlayerData = context.get("player")
-        if state is None or player is None or player.is_demoed:
+        if not isinstance(state, GameState) or not isinstance(player, PlayerData) or player.is_demoed:
             return self._controls.neutral()
 
         # Allow the rule-based supervisor to seize control when the match state
@@ -168,7 +168,22 @@ class Agent:
         return controls
 
     def _start_macro(self, macro: MacroAction) -> None:
-        self._macro_instance = macro.instantiate()
+        if macro is None:
+            self._macro_instance = None
+            return
+
+        if (
+            self._macro_instance is not None
+            and not self._macro_instance.finished
+            and self._macro_instance.macro is macro
+        ):
+            return
+
+        try:
+            self._macro_instance = macro.instantiate()
+        except Exception as exc:  # pragma: no cover - defensive safeguard
+            print(f"Failed to start macro '{getattr(macro, 'name', '<unknown>')}': {exc}")
+            self._macro_instance = None
 
     # ------------------------------------------------------------------
     # Low-level driving helpers
@@ -179,6 +194,8 @@ class Agent:
         distance = float(np.linalg.norm(to_target[:2]))
 
         rotation = car.rotation_mtx()
+        if rotation.shape != (3, 3):
+            rotation = np.identity(3, dtype=np.float32)
         local = rotation.T @ to_target
         angle = math.atan2(local[1], local[0])
 

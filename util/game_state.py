@@ -29,19 +29,34 @@ class GameState:
         self.last_touch: int | None = None
 
     def decode(self, packet: GameTickPacket, ticks_elapsed: int = 1) -> None:
+        try:
+            ticks = int(round(float(ticks_elapsed)))
+        except (TypeError, ValueError):
+            ticks = 1
+        ticks = max(ticks, 1)
+
         self.blue_score = packet.teams[0].score
         self.orange_score = packet.teams[1].score
 
-        for i in range(packet.num_boost):
-            self.boost_pads[i] = packet.game_boosts[i].is_active
+        boost_count = min(packet.num_boost, self.boost_pads.size)
+        for i in range(boost_count):
+            self.boost_pads[i] = float(packet.game_boosts[i].is_active)
+        if boost_count < self.boost_pads.size:
+            self.boost_pads[boost_count:] = 0
         self.inverted_boost_pads[:] = self.boost_pads[::-1]
 
-        self.ball.decode_ball_data(packet.game_ball.physics)
-        self.inverted_ball.invert(self.ball)
+        if packet.game_ball is not None:
+            self.ball.decode_ball_data(packet.game_ball.physics)
+            self.inverted_ball.invert(self.ball)
 
         self.players = []
-        for i in range(packet.num_cars):
-            player = self._decode_player(packet.game_cars[i], i, ticks_elapsed)
+        player_limit = min(packet.num_cars, len(self._on_ground_ticks))
+        for i in range(player_limit):
+            player_info = packet.game_cars[i]
+            if player_info is None:
+                continue
+
+            player = self._decode_player(player_info, i, ticks)
             self.players.append(player)
 
             if player.ball_touched:
@@ -50,8 +65,10 @@ class GameState:
     def _decode_player(self, player_info: PlayerInfo, index: int, ticks_elapsed: int) -> PlayerData:
         player_data = PlayerData()
 
-        player_data.car_data.decode_car_data(player_info.physics)
-        player_data.inverted_car_data.invert(player_data.car_data)
+        physics = player_info.physics
+        if physics is not None:
+            player_data.car_data.decode_car_data(physics)
+            player_data.inverted_car_data.invert(player_data.car_data)
 
         if player_info.has_wheel_contact:
             self._on_ground_ticks[index] = 0
