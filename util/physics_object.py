@@ -1,4 +1,4 @@
-import math
+import math  # Provides trig helpers for orientation conversions
 import numpy as np
 from rlbot.utils.structures.game_data_struct import Physics, Vector3, Rotator
 
