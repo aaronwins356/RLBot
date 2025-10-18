@@ -1,151 +1,199 @@
 from __future__ import annotations
 
-from pathlib import Path
+import math
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import numpy as np
-import torch
 
-from discrete_policy import DiscreteFF
-from your_act import YourActionParser
-from your_obs import OBS_SIZE
+from mechanics import MacroAction, MacroInstance, MechanicSupervisor, routines
+from util.common_values import BLUE_GOAL_CENTER, BLUE_TEAM, ORANGE_GOAL_CENTER
+from util.game_state import GameState
+from util.player_data import PlayerData
+from your_act import ControlLibrary, blend
 
 
-# Hidden-layer sizes for the discrete feed-forward policy network.  The network
-# mirrors the architecture used during PPO training and can be tweaked to trade
-# latency for policy quality.
-POLICY_LAYER_SIZES = [256, 256, 128]
+@dataclass
+class Decision:
+    """Container describing the agent's next move."""
+
+    controls: Optional[np.ndarray] = None
+    macro: Optional[MacroAction] = None
 
 
 class Agent:
-    def __init__(self, policy_path: Optional[Path] = None) -> None:
-        self.action_parser = YourActionParser()
-        self.num_actions = len(self.action_parser.lookup_table)
-        cur_dir = Path(__file__).resolve().parent
+    """Rule-based agent blending heuristics with scripted mechanics."""
 
-        device = torch.device("cpu")
-        self.policy = DiscreteFF(OBS_SIZE, self.num_actions, POLICY_LAYER_SIZES, device)
-        checkpoint = policy_path or cur_dir / "PPO_POLICY.pt"
-        self._weights_loaded = self._load_weights(checkpoint, device)
-        self._fallback = HeuristicPilot(self.action_parser)
-        torch.set_num_threads(1)
+    def __init__(self) -> None:
+        self._controls = ControlLibrary()
+        self._supervisor = MechanicSupervisor()
+        self._macro_instance: Optional[MacroInstance] = None
 
-    def act(self, obs: np.ndarray, context: Optional[Dict[str, Any]] = None) -> np.ndarray:
-        if self._weights_loaded:
-            self.action_parser.maybe_supervise(context)
-
-            with torch.no_grad():
-                action_idx, _ = self.policy.get_action(obs, deterministic=True)
-
-            action = np.asarray(self.action_parser.parse_actions([int(action_idx)], context))
-        else:
-            action = self._fallback.act(context)
-
-        if action.ndim == 2 and action.shape[0] == 1:
-            action = action[0]
-
-        if action.ndim != 1:
-            raise ValueError(f"Invalid action returned from parser: shape={action.shape}")
-
-        return action
-
-    def _load_weights(self, path: Path, device: torch.device) -> bool:
-        if not path.exists():
-            print(
-                "[agent] No PPO checkpoint found at"
-                f" {path.name}. Falling back to heuristic controls until training is complete."
-            )
-            return False
-
-        try:
-            state_dict = torch.load(path, map_location=device)
-        except Exception as exc:  # pragma: no cover - defensive logging
-            print(f"[agent] Failed to load PPO weights from {path}: {exc}. Using heuristic fallback.")
-            return False
-
-        self.policy.load_state_dict(state_dict)
-        return True
-
-
-class HeuristicPilot:
-    """Light-weight heuristics providing safe controls when no policy is available."""
-
-    def __init__(self, action_parser: YourActionParser) -> None:
-        self._parser = action_parser
-        self._name_to_index = action_parser.name_to_index
-        self._neutral_idx = self._name_to_index.get("neutral", action_parser.cancel_index)
-
-    def act(self, context: Optional[Dict[str, Any]]) -> np.ndarray:
-        action_index = self._choose_action_index(context)
-        return np.asarray(self._parser.parse_actions([action_index], context))
+        # Pre-build reusable macros so they can be triggered without delay.
+        self._fast_aerial = routines.fast_aerial_macro()
+        self._half_flip = routines.half_flip_macro()
+        self._power_shot = routines.power_shot_macro()
+        self._dribble = routines.ground_dribble_macro()
 
     # ------------------------------------------------------------------
-    # Heuristic selection
+    # Public API
 
-    def _choose_action_index(self, context: Optional[Dict[str, Any]]) -> int:
+    def act(self, context: Optional[Dict[str, Any]]) -> np.ndarray:
         if not context:
-            return self._neutral_idx
+            return self._controls.neutral()
 
-        state = context.get("state")
-        player = context.get("player")
-        if state is None or player is None:
-            return self._neutral_idx
+        state: GameState = context.get("state")
+        player: PlayerData = context.get("player")
+        if state is None or player is None or player.is_demoed:
+            return self._controls.neutral()
 
-        ball = state.ball
+        # Allow the rule-based supervisor to seize control when the match state
+        # demands an urgent mechanic (kickoff, recovery, panic clear).
+        supervisor_macro = self._supervisor.maybe_override(
+            context, active_macro=self._macro_instance.macro if self._macro_instance else None
+        )
+        if supervisor_macro is not None:
+            self._start_macro(supervisor_macro)
+
+        if self._macro_instance is not None:
+            return self._advance_macro()
+
+        decision = self._evaluate_state(state, player)
+        if decision.macro is not None:
+            self._start_macro(decision.macro)
+            return self._advance_macro()
+
+        return decision.controls if decision.controls is not None else self._controls.neutral()
+
+    # ------------------------------------------------------------------
+    # Decision making
+
+    def _evaluate_state(self, state: GameState, player: PlayerData) -> Decision:
         car = player.car_data
-        rel = ball.position - car.position
-        flat_dist = float(np.linalg.norm(rel[:2]))
+        ball = state.ball
+
+        to_ball = ball.position - car.position
+        flat_dist = float(np.linalg.norm(to_ball[:2]))
+        height_diff = float(ball.position[2] - car.position[2])
+
         forward = car.forward()
         forward_flat = forward[:2]
-        forward_flat /= np.linalg.norm(forward_flat) + 1e-6
-        target_flat = rel[:2]
-        target_flat /= np.linalg.norm(target_flat) + 1e-6
+        forward_norm = np.linalg.norm(forward_flat)
+        if forward_norm > 1e-6:
+            forward_flat /= forward_norm
+        ball_flat = to_ball[:2]
+        ball_norm = np.linalg.norm(ball_flat)
+        if ball_norm > 1e-6:
+            ball_flat /= ball_norm
+        facing_ball = float(np.dot(forward_flat, ball_flat)) if ball_norm > 1e-6 else 0.0
 
-        facing = float(np.clip(np.dot(forward_flat, target_flat), -1.0, 1.0))
-        cross_z = forward_flat[0] * target_flat[1] - forward_flat[1] * target_flat[0]
+        if self._should_fast_aerial(player, flat_dist, height_diff, facing_ball):
+            return Decision(macro=self._fast_aerial)
 
-        if self._is_kickoff(state):
-            return self._name_to_index.get("speed_flip_kickoff", self._neutral_idx)
+        if self._should_half_flip(player, facing_ball, flat_dist):
+            return Decision(macro=self._half_flip)
 
-        if not player.on_ground and np.linalg.norm(car.linear_velocity) > 400:
-            return self._name_to_index.get("aerial_recovery", self._neutral_idx)
+        if self._should_power_shot(flat_dist, height_diff, facing_ball):
+            return Decision(macro=self._power_shot)
 
-        if player.on_ground:
-            if ball.position[2] > 1500 and player.boost_amount > 0.4:
-                return self._name_to_index.get("fast_aerial", self._neutral_idx)
+        if self._should_dribble(flat_dist, height_diff, facing_ball):
+            return Decision(macro=self._dribble)
 
-            if facing < -0.3 and flat_dist > 1200:
-                return self._name_to_index.get("half_flip", self._neutral_idx)
+        target = self._choose_target(state, player)
+        controls = self._drive_towards(player, target, boost_ok=flat_dist > 1800)
+        return Decision(controls=controls)
 
-            if flat_dist < 650 and ball.position[2] < 300:
-                return self._name_to_index.get("dribble_carry", self._neutral_idx)
+    def _should_fast_aerial(self, player: PlayerData, flat_dist: float, height_diff: float, facing_ball: float) -> bool:
+        return (
+            player.on_ground
+            and player.boost_amount > 0.45
+            and height_diff > 220
+            and flat_dist > 900
+            and facing_ball > 0.4
+        )
 
-            if flat_dist < 900 and ball.position[2] < 400 and facing > 0.7:
-                return self._name_to_index.get("power_shot", self._neutral_idx)
+    def _should_half_flip(self, player: PlayerData, facing_ball: float, flat_dist: float) -> bool:
+        return player.on_ground and facing_ball < -0.3 and flat_dist > 900 and player.has_flip
 
-        if facing > 0.9:
-            if flat_dist > 2000 and player.boost_amount > 0.3:
-                return self._name_to_index.get("boost_forward", self._neutral_idx)
-            return self._name_to_index.get("drive_forward", self._neutral_idx)
+    def _should_power_shot(self, flat_dist: float, height_diff: float, facing_ball: float) -> bool:
+        return flat_dist < 750 and height_diff < 200 and facing_ball > 0.6
 
-        if flat_dist < 800 and abs(cross_z) > 0.25:
-            if cross_z > 0:
-                return self._name_to_index.get("powerslide_left", self._neutral_idx)
-            return self._name_to_index.get("powerslide_right", self._neutral_idx)
+    def _should_dribble(self, flat_dist: float, height_diff: float, facing_ball: float) -> bool:
+        return flat_dist < 600 and height_diff < 150 and facing_ball > 0.4
 
-        if cross_z > 0.05:
-            return self._name_to_index.get("sharp_left", self._neutral_idx)
-        if cross_z < -0.05:
-            return self._name_to_index.get("sharp_right", self._neutral_idx)
+    def _choose_target(self, state: GameState, player: PlayerData) -> np.ndarray:
+        ball = state.ball
+        car = player.car_data
+        team = player.team_num
 
-        if facing < -0.2:
-            return self._name_to_index.get("drive_reverse", self._neutral_idx)
+        if team == BLUE_TEAM:
+            opponent_goal = np.asarray(ORANGE_GOAL_CENTER, dtype=np.float32)
+        else:
+            opponent_goal = np.asarray(BLUE_GOAL_CENTER, dtype=np.float32)
 
-        return self._name_to_index.get("stabilise", self._neutral_idx)
+        to_goal = opponent_goal - ball.position
+        to_goal_flat = to_goal[:2]
+        distance_to_goal = np.linalg.norm(to_goal_flat)
+        if distance_to_goal > 1e-6:
+            to_goal_flat /= distance_to_goal
 
-    @staticmethod
-    def _is_kickoff(state: Any) -> bool:
-        ball = getattr(state, "ball", None)
-        if ball is None:
-            return False
-        return float(np.linalg.norm(ball.position[:2])) < 60 and float(np.linalg.norm(ball.linear_velocity)) < 10
+        approach_offset = to_goal_flat * 750.0
+        approach = np.asarray([ball.position[0] - approach_offset[0], ball.position[1] - approach_offset[1], car.position[2]])
+
+        # Encourage shadowing when the ball is deep in defence.
+        defensive_line = -3500 if team == BLUE_TEAM else 3500
+        if (team == BLUE_TEAM and ball.position[1] < defensive_line) or (
+            team != BLUE_TEAM and ball.position[1] > defensive_line
+        ):
+            shadow_offset = to_goal_flat * -1200.0
+            approach = np.asarray(
+                [ball.position[0] + shadow_offset[0], ball.position[1] + shadow_offset[1], car.position[2]]
+            )
+
+        # Keep the target slightly ahead of the ball to avoid stopping on top of it.
+        lead = to_goal_flat * -120.0
+        approach[:2] += lead
+        return approach
+
+    # ------------------------------------------------------------------
+    # Macro handling
+
+    def _advance_macro(self) -> np.ndarray:
+        if self._macro_instance is None:
+            return self._controls.neutral()
+
+        controls = self._macro_instance.step().copy()
+        if self._macro_instance.finished:
+            self._macro_instance = None
+        return controls
+
+    def _start_macro(self, macro: MacroAction) -> None:
+        self._macro_instance = macro.instantiate()
+
+    # ------------------------------------------------------------------
+    # Low-level driving helpers
+
+    def _drive_towards(self, player: PlayerData, target: np.ndarray, *, boost_ok: bool) -> np.ndarray:
+        car = player.car_data
+        to_target = target - car.position
+        distance = float(np.linalg.norm(to_target[:2]))
+
+        rotation = car.rotation_mtx()
+        local = rotation.T @ to_target
+        angle = math.atan2(local[1], local[0])
+
+        steer = np.clip(angle * 2.0, -1.0, 1.0)
+        throttle = 1.0 if local[0] > 0 else -1.0
+
+        if distance < 900:
+            throttle = np.clip(distance / 900, -1.0, 1.0) * (1.0 if throttle > 0 else -1.0)
+
+        handbrake = 1.0 if abs(angle) > 1.8 and distance < 1600 else 0.0
+        boost = 0.0
+        if boost_ok and throttle > 0.6 and abs(angle) < 0.3 and player.boost_amount > 0.2:
+            forward_speed = float(np.dot(car.linear_velocity, car.forward()))
+            if forward_speed < 1900:
+                boost = 1.0
+
+        base = self._controls.drive_forward() if throttle >= 0 else self._controls.drive_reverse()
+        return blend(base, steer=steer, throttle=throttle, boost=boost, handbrake=handbrake)

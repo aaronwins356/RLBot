@@ -1,27 +1,34 @@
-import numpy as np
+"""Light-weight replication of the RLGym game state for heuristics."""
+
+from __future__ import annotations
+
 from typing import List
 
-from rlbot.utils.structures.game_data_struct import GameTickPacket, FieldInfoPacket, PlayerInfo
+import numpy as np
+from rlbot.utils.structures.game_data_struct import FieldInfoPacket, GameTickPacket, PlayerInfo
 
 from .physics_object import PhysicsObject
 from .player_data import PlayerData
 
 
 class GameState:
+    """Mirror of the RLGym ``GameState`` tailored for heuristic control."""
+
     def __init__(self, game_info: FieldInfoPacket):
         self.blue_score = 0
         self.orange_score = 0
         self.players: List[PlayerData] = []
-        self._on_ground_ticks = np.zeros(64)
+        self._on_ground_ticks = np.zeros(64, dtype=np.int32)
 
         self.ball: PhysicsObject = PhysicsObject()
         self.inverted_ball: PhysicsObject = PhysicsObject()
 
-        # List of "booleans" (1 or 0)
+        # List of ``booleans`` (1 or 0)
         self.boost_pads: np.ndarray = np.zeros(game_info.num_boosts, dtype=np.float32)
         self.inverted_boost_pads: np.ndarray = np.zeros_like(self.boost_pads, dtype=np.float32)
+        self.last_touch: int | None = None
 
-    def decode(self, packet: GameTickPacket, ticks_elapsed=1):
+    def decode(self, packet: GameTickPacket, ticks_elapsed: int = 1) -> None:
         self.blue_score = packet.teams[0].score
         self.orange_score = packet.teams[1].score
 
@@ -55,8 +62,8 @@ class GameState:
         player_data.team_num = player_info.team
         player_data.is_demoed = player_info.is_demolished
         player_data.on_ground = player_info.has_wheel_contact or self._on_ground_ticks[index] <= 6
-        player_data.ball_touched = False
-        player_data.has_flip = not player_info.double_jumped  # RLGym does consider the timer/unlimited flip, but i'm too lazy to track that in rlbot
+        player_data.ball_touched = bool(player_info.ball_touched)
+        player_data.has_flip = not player_info.double_jumped
         player_data.boost_amount = player_info.boost / 100
 
         return player_data
