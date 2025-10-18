@@ -169,7 +169,9 @@ class PPOTrainer:
         value = self.value_fn(obs_tensor).item()
         return action, log_prob, value
 
-    def compute_returns(self, rewards: List[float], dones: List[bool], values: List[float], last_value: float) -> Tuple[np.ndarray, np.ndarray]:
+    def compute_returns(
+        self, rewards: List[float], dones: List[bool], values: List[float], last_value: float
+    ) -> Tuple[np.ndarray, np.ndarray]:
         returns = np.zeros(len(rewards) + 1, dtype=np.float32)
         advantages = np.zeros(len(rewards), dtype=np.float32)
         returns[-1] = last_value

@@ -25,9 +25,12 @@ and timed macros, and an end-to-end training pipeline built on top of
    (typically Python 3.9 on Windows).  Optional tooling such as
    `stable-baselines3` and `tensorboard` integrate cleanly with the training
    scripts.
-2. **Configure the bot** – adjust branding and metadata in `bot.cfg`, ensure the
-   trained weights are exported to `PPO_POLICY.pt` (the file is ignored by git), and tweak `POLICY_LAYER_SIZES`
-   or `tick_skip` if you target a different latency envelope.
+2. **Configure the bot** – adjust branding and metadata in `bot.cfg`, export your
+   trained weights to `PPO_POLICY.pt` (the file is ignored by git), and tweak
+   `POLICY_LAYER_SIZES` or `tick_skip` if you target a different latency
+   envelope.  If the checkpoint is missing the agent falls back to an embedded
+   heuristic pilot so it can still launch inside RLBotGUI while you iterate on
+   training.
 3. **Launch through RLBotGUI** – point the GUI at `bot.cfg`, confirm that the
    dependencies install successfully, and verify the bot stabilises at the
    desired FPS tier.
