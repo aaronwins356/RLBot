@@ -22,13 +22,12 @@ class Decision:
 
 
 class Agent:
-    """Rule-based agent blending heuristics with scripted mechanics."""
+    """Rule-based agent that mixes heuristics with scripted mechanics."""
 
     def __init__(self) -> None:
         self._controls = ControlLibrary()
         self._supervisor = MechanicSupervisor()
         self._macro_instance: Optional[MacroInstance] = None
-
         # Pre-build reusable macros so they can be triggered without delay.
         self._fast_aerial = routines.fast_aerial_macro()
         self._half_flip = routines.half_flip_macro()
