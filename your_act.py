@@ -43,6 +43,7 @@ class YourActionParser:
     def __init__(self) -> None:
         self._lookup_table: List[ActionEntry] = self._build_lookup_table()
         self.lookup_table = self._lookup_table  # Public attribute used by the agent
+        self.name_to_index = {entry.name: idx for idx, entry in enumerate(self._lookup_table)}
         self.action_space = gym.spaces.Discrete(len(self._lookup_table))
 
         self._active_macro = None
@@ -56,6 +57,10 @@ class YourActionParser:
         self._cancel_index = next(
             i for i, entry in enumerate(self._lookup_table) if entry.name == "cancel_macro"
         )
+
+    @property
+    def cancel_index(self) -> int:
+        return self._cancel_index
 
     def _build_lookup_table(self) -> List[ActionEntry]:
         simple_actions = [

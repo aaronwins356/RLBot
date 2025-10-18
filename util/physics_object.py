@@ -13,7 +13,7 @@ class PhysicsObject:
         self.linear_velocity: np.ndarray = linear_velocity if linear_velocity else np.zeros(3)
         self.angular_velocity: np.ndarray = angular_velocity if angular_velocity else np.zeros(3)
         self._euler_angles: np.ndarray = euler_angles if euler_angles else np.zeros(3)
-        self._rotation_mtx: np.ndarray = np.zeros((3,3))
+        self._rotation_mtx: np.ndarray = np.zeros((3, 3))
         self._has_computed_rot_mtx = False
 
         self._invert_vec = np.asarray([-1, -1, 1])

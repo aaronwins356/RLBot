@@ -6,16 +6,13 @@ import argparse
 from pathlib import Path
 from statistics import mean
 
-import torch
-
 from agent import Agent
 from training.train import make_default_env
 
 
 def evaluate(checkpoint: Path, episodes: int = 20, team_size: int = 1, tick_skip: int = 8) -> None:  # pragma: no cover - depends on RLGym
     env, _ = make_default_env(team_size, tick_skip)
-    agent = Agent()
-    agent.policy.load_state_dict(torch.load(checkpoint, map_location="cpu"))
+    agent = Agent(policy_path=checkpoint)
     agent.policy.eval()
 
     wins = 0
