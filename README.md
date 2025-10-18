@@ -1,22 +1,19 @@
-# Phoenix Heuristic Rocket League Bot
+# Phoenix Rocket League Bot
 
-Phoenix is a fresh take on your Rocket League automation setup. Instead of
-relying on a neural-network policy file, the bot combines robust heuristics
-with a library of scripted mechanics (fast aerials, half flips, panic clears).
-The result is a dependable, easy-to-run opponent that no longer requires extra
-training artifacts.
+Phoenix is a fresh take on your Rocket League automation setup. The bot relies
+on a tuned set of heuristics and scripted mechanics (fast aerials, half flips,
+panic clears) so the car always has something purposeful to do on the pitch.
+The behaviour is intentionally lightweight and ships without any external
+training artefacts so you can understand every decision the bot makes.
 
 ---
 
 ## 1. What this project delivers
 
-* Plug-and-play Rocket League bot which runs entirely on rule-based logic.
+* Plug-and-play Rocket League bot driven entirely by transparent heuristics.
 * Scripted routines for kick-offs, recoveries, clears, and striking plays.
-* Clean Python modules so you can tweak behaviour without digging through
-  machine-learning code.
-
-The repository now has **no external policy checkpoint requirements**. Every
-match starts with the heuristic pilot immediately.
+* Clean Python modules that you can tweak without hunting down training code or
+  external assets.
 
 ---
 
@@ -26,8 +23,8 @@ match starts with the heuristic pilot immediately.
 2. Ensure Rocket League is installed on Windows and launches normally.
 3. Allow RLBotGUI to install Python 3.11 when prompted.
 
-No additional machine-learning packages are required; the `requirements.txt`
-contains only RLBot and NumPy.
+No heavyweight ML dependencies are required; everything runs on the core RLBot
+stack plus NumPy.
 
 ---
 
@@ -37,13 +34,13 @@ contains only RLBot and NumPy.
 | --- | --- |
 | `bot.cfg` | RLBot configuration pointing to the Phoenix bot entry point. |
 | `bot.py` | RLBot agent wiring which feeds game state into the heuristic agent. |
-| `agent.py` | Core decision logic mixing heuristics with scripted mechanics. |
+| `agent.py` | Core decision logic blending heuristics with scripted mechanics. |
 | `mechanics/` | Macro actions (fast aerial, half flip, etc.) and their supervisor. |
 | `util/` | Small data structures mirroring the info the bot consumes. |
 | `appearance.cfg` | Optional cosmetics for the bot. |
-
-The previous machine-learning scaffolding (`discrete_policy.py`, `training/`, and
-the PPO observation builder) has been retired.
+The previous heavyweight PPO scaffolding (`discrete_policy.py`, `training/`, and
+observation builders) remains retired; the new logic is intentionally lean and
+easy to reason about.
 
 ---
 
@@ -69,8 +66,8 @@ friends.
 * **Control presets** – `your_act.py` keeps reusable controller arrays. Add new
   presets or modify existing ones to influence the bot’s driving posture.
 
-Because everything is pure Python heuristics, you can hot reload changes through
-RLBotGUI without waiting on neural-network training.
+Because everything is still pure Python + NumPy, you can hot reload changes
+through RLBotGUI without training a neural network.
 
 ---
 
