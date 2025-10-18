@@ -1,10 +1,9 @@
-# Include everything the framework requires
-# You will automatically get updates for all versions starting with "1.".
-rlbot==1.*
---find-links https://download.pytorch.org/whl/torch_stable.html
-torch==1.9.1+cpu
+# Runtime dependencies for RLBotGUI
+rlbot==1.67.7
+torch==2.1.2
+numpy==1.23.5
+gym==0.26.2
 rlgym-compat==1.0.2
-numpy
 
-# This will cause pip to auto-upgrade and stop scaring people with warning messages
+# Quality-of-life tools installed alongside the bot environment
 pip
