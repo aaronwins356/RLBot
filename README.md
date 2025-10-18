@@ -18,7 +18,7 @@ The project folder already contains everything required for match play. A single
 
 1. **Install RLBotGUI** (the easiest way to manage bots) from [rlbot.org](https://www.rlbot.org/).
 2. **Install Rocket League on Windows** and make sure you can launch the game normally.
-3. **Prepare Python 3.9** (32-bit or 64-bit). RLBotGUI will help you install it if it is missing.
+3. **Prepare Python 3.11.0** (32-bit or 64-bit). RLBotGUI will help you install it if it is missing.
 
 That is all the setup you need before working with this repository.
 

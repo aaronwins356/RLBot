@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover - gracefully handle missing training dep
 def _ensure_dependency(name: str) -> None:
     if make_rlgym_env is None:
         raise ImportError(
-            f"{name} is required for training. Install rlgym and rlgym-compat in a Python 3.9 environment."
+            f"{name} is required for training. Install rlgym and rlgym-compat in a Python 3.11.0 environment."
         )
 
 
