@@ -1,9 +1,6 @@
 # Runtime dependencies for RLBotGUI
 rlbot==1.67.7
-torch==2.1.2
 numpy==1.23.5
-gym==0.26.2
-rlgym-compat==1.0.2
 
 # Quality-of-life tools installed alongside the bot environment
 pip
