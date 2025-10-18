@@ -1,94 +1,92 @@
 # Hybrid Mechanics PPO Bot
 
-This repository packages a Rocket League bot that blends scripted champion-level
-mechanics with a discrete PPO policy.  It ships with a deterministic
-observation builder, a hybrid action parser that exposes both low-level control
-and timed macros, and an end-to-end training pipeline built on top of
-`rlgym-compat`.
+Welcome! This guide explains how to install, configure, and run the Hybrid Mechanics PPO Bot for Rocket League without needing any coding experience. Follow the steps in order and you will have the bot driving in matches through the RLBot framework.
 
-## Repository layout
+---
 
-| Path | Purpose |
+## 1. What this project delivers
+
+* A ready-to-use Rocket League bot that mixes reliable scripted moves with a machine-learned decision maker.
+* Easy-to-edit settings so you can personalise the bot's name, appearance, and behaviour.
+* Optional tools for advanced training and evaluation if you later decide to improve the bot yourself.
+
+The project folder already contains everything required for match play. A single additional file—your trained policy called `PPO_POLICY.pt`—is expected when you are ready to deploy custom behaviour. If you do not provide that file, the bot falls back to a built-in safety pilot so it can still play matches.
+
+---
+
+## 2. Before you start
+
+1. **Install RLBotGUI** (the easiest way to manage bots) from [rlbot.org](https://www.rlbot.org/).
+2. **Install Rocket League on Windows** and make sure you can launch the game normally.
+3. **Prepare Python 3.9** (32-bit or 64-bit). RLBotGUI will help you install it if it is missing.
+
+That is all the setup you need before working with this repository.
+
+---
+
+## 3. Folder tour (for orientation only)
+
+| Item | Plain-language description |
 | --- | --- |
-| `agent.py` | Loads the trained policy and exposes a deterministic `act` API. |
-| `your_obs.py` | Deterministic observation builder shared between training and inference. |
-| `your_act.py` | Hybrid action parser with mechanical macros and rule-based overrides. |
-| `mechanics/` | Scripted routines, macro definitions, and the safety supervisor. |
-| `training/` | PPO training loop, reward shaping, and evaluation harness. |
-| `PPO_POLICY.pt` | (Not tracked) Place your trained checkpoint here before launching the bot. |
+| `bot.cfg` | The configuration RLBotGUI reads. It stores the bot name, author, and which Python file to run. |
+| `agent.py` | Loads the trained policy and sends button presses to the game. |
+| `your_obs.py` | Describes what information about the match the bot will “see”. |
+| `your_act.py` | Converts the bot's decisions into controller actions and special move macros. |
+| `mechanics/` | Contains the scripted manoeuvres such as fast aerials, recoveries, and safety rules. |
+| `training/` | Extra tools for power users who want to retrain or evaluate the bot. |
+| `requirements.txt` | The list of Python packages RLBotGUI will install automatically. |
 
-## Getting started
+> **Tip:** You do **not** need to edit any of these files to run the bot. Only adjust `bot.cfg` and the optional `PPO_POLICY.pt` checkpoint.
 
-1. **Install dependencies** – the runtime requirements are listed in
-   `requirements.txt`.  For training you additionally need
-   `rlgym`, `rlgym-compat`, and a physics-enabled simulator environment
-   (typically Python 3.9 on Windows).  Optional tooling such as
-   `stable-baselines3` and `tensorboard` integrate cleanly with the training
-   scripts.
-2. **Configure the bot** – adjust branding and metadata in `bot.cfg`, export your
-   trained weights to `PPO_POLICY.pt` (the file is ignored by git), and tweak
-   `POLICY_LAYER_SIZES` or `tick_skip` if you target a different latency
-   envelope.  If the checkpoint is missing the agent falls back to an embedded
-   heuristic pilot so it can still launch inside RLBotGUI while you iterate on
-   training.
-3. **Launch through RLBotGUI** – point the GUI at `bot.cfg`, confirm that the
-   dependencies install successfully, and verify the bot stabilises at the
-   desired FPS tier.
+---
 
-## Observation design
+## 4. Quick start: run the bot in RLBotGUI
 
-`YourOBS` produces a 140-length vector that captures:
+1. **Open RLBotGUI** and choose **Add > Existing Bot**.
+2. Browse to the folder containing this README and select `bot.cfg`.
+3. Allow RLBotGUI to install the listed Python packages when prompted.
+4. (Optional) Place your trained policy file in the same folder and rename it to `PPO_POLICY.pt`.
+5. Press **Launch** in RLBotGUI and start a match. The bot will automatically load the policy (or the built-in fallback) and begin playing.
 
-* Scoreline context and ball physics.
-* Full car state for the controlled player, including orientation vectors and
-  relative position to the ball.
-* Teammate and opponent slices (up to 3v3) padded deterministically.
-* Boost pad availability and the previously applied control vector.
+You can repeat these steps to field multiple bots or to join them with human teammates.
 
-All physics quantities are normalised into approximately `[-1, 1]` to stabilise
-PPO updates and prevent distribution drift between training and inference.
+---
 
-## Action space and mechanics
+## 5. Customise the bot without coding
 
-`YourActionParser` exposes 16 low-level control templates alongside a curated
-set of mechanical macros (fast aerials, half-flips, dribble carries, panic
-clears, etc.).  Macros are encoded as timed control sequences in
-`mechanics/routines.py`, while `mechanics/supervisor.py` houses a safety gate
-that can override the policy in emergencies (kickoffs, recoveries, own-goal
-threats).
+* **Name, appearance, and loadout** – open `bot.cfg` in any text editor and follow the comments. Update the `name`, `agent_class`, and look settings as desired.
+* **Tick rate and performance** – inside `bot.cfg`, the `python_file` points to `bot.py`, which already handles performance tuning. Most users can leave these values at their defaults.
+* **Policy upgrades** – replace `PPO_POLICY.pt` with a new checkpoint file whenever you have improved training results. The bot will load the newest file on the next launch.
 
-During inference the parser can be cancelled by selecting the dedicated
-`cancel_macro` action, allowing PPO to blend scripted manoeuvres with fine-grain
-steering and boost usage.
+Always save the edited file and re-launch through RLBotGUI to apply changes.
 
-## Training pipeline
+---
 
-`training/train.py` provides a from-scratch PPO implementation that mirrors the
-inference architecture (`DiscreteFF` for the actor plus a value head).  The
-script relies on `rlgym-compat` to recreate the RLBot observation/action space
-and uses the reward shaping defined in `training/rewards.py` to blend dense
-fundamentals with mechanic bonuses.
+## 6. Advanced: training your own policy (optional)
 
-Run training with:
+You only need this section if you want to retrain the machine learning policy yourself. It assumes basic familiarity with Python tools.
 
-```bash
-python -m training.train --steps 2000000 --rollout 8192 --team-size 2 --tick-skip 8 --checkpoint PPO_POLICY.pt
-```
+1. Create a Python environment with the packages listed in `requirements.txt`, plus `rlgym`, `rlgym-compat`, `stable-baselines3`, and `tensorboard`.
+2. Start training with:
+   ```bash
+   python -m training.train --steps 2000000 --rollout 8192 --team-size 2 --tick-skip 8 --checkpoint PPO_POLICY.pt
+   ```
+3. Review performance or compare against scripted opponents with:
+   ```bash
+   python -m training.evaluate PPO_POLICY.pt --episodes 50
+   ```
+4. Copy the resulting `PPO_POLICY.pt` into the bot folder before launching through RLBotGUI.
 
-Evaluation against scripted opponents is available via:
+If you prefer to avoid command-line work, you can stay with the supplied policy file or the fallback pilot.
 
-```bash
-python -m training.evaluate PPO_POLICY.pt --episodes 50
-```
+---
 
-Both scripts expect the training dependencies to be installed in the active
-environment.
+## 7. Final checklist before sharing the bot
 
-## Packaging checklist
+* [ ] Update `bot.cfg` with final branding, contact details, and community tags.
+* [ ] Confirm `requirements.txt` installs successfully via RLBotGUI.
+* [ ] Include the latest `PPO_POLICY.pt` (or instructions for obtaining it) if you distribute the bot.
+* [ ] Consider bundling highlight replays or videos to showcase behaviour.
+* [ ] Document any optional telemetry or visualisers you enable.
 
-* Update `bot.cfg` with final branding, contact information, and relevant tags.
-* Export a trained checkpoint to `PPO_POLICY.pt` (or update `agent.py` to point at your preferred path).
-* Document any optional extras (rendering, telemetry) in this README.
-* Verify that `requirements.txt` installs cleanly through RLBotGUI.
-* Bundle showcase replays or videos when submitting to the RLBot community.
-
+With these steps complete, the Hybrid Mechanics PPO Bot is ready for local matches or community tournaments—no coding required. Enjoy the games!
