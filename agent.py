@@ -1,43 +1,58 @@
-import math
-import os
-import pickle
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
-from torch.distributions import Categorical
 
-from your_act import YourActionParser
-import your_obs
 from discrete_policy import DiscreteFF
+from your_act import YourActionParser
+from your_obs import OBS_SIZE
 
-# You can get the OBS size from the rlgym-ppo console print-outs when you start your bot
-OBS_SIZE = your_obs_size_here
 
-# If you haven't set these, they are [256, 256, 256] by default
-POLICY_LAYER_SIZES = [your, layer, sizes, here]
+# Hidden-layer sizes for the discrete feed-forward policy network.  The network
+# mirrors the architecture used during PPO training and can be tweaked to trade
+# latency for policy quality.
+POLICY_LAYER_SIZES = [256, 256, 128]
+
 
 class Agent:
-	def __init__(self):
-		self.action_parser = YourActionParser()
-		self.num_actions = len(self.action_parser._lookup_table)
-		cur_dir = os.path.dirname(os.path.realpath(__file__))
-		
-		device = torch.device("cpu")
-		self.policy = DiscreteFF(OBS_SIZE, self.num_actions, POLICY_LAYER_SIZES, device)
-		self.policy.load_state_dict(torch.load(os.path.join(cur_dir, "PPO_POLICY.pt"), map_location=device))
-		torch.set_num_threads(1)
+    def __init__(self) -> None:
+        self.action_parser = YourActionParser()
+        self.num_actions = len(self.action_parser.lookup_table)
+        cur_dir = Path(__file__).resolve().parent
 
-	def act(self, state):
-		with torch.no_grad():
-			action_idx, probs = self.policy.get_action(state, True)
-		
-		action = np.array(self.action_parser.parse_actions([action_idx], None))
-		if len(action.shape) == 2:
-			if action.shape[0] == 1:
-				action = action[0]
-		
-		if len(action.shape) != 1:
-			raise Exception("Invalid action:", action)
-		
-		return action
+        device = torch.device("cpu")
+        self.policy = DiscreteFF(OBS_SIZE, self.num_actions, POLICY_LAYER_SIZES, device)
+        self._load_weights(cur_dir / "PPO_POLICY.pt", device)
+        torch.set_num_threads(1)
+
+    def act(self, obs: np.ndarray, context: Optional[Dict[str, Any]] = None) -> np.ndarray:
+        self.action_parser.maybe_supervise(context)
+
+        with torch.no_grad():
+            action_idx, _ = self.policy.get_action(obs, deterministic=True)
+
+        action = np.asarray(self.action_parser.parse_actions([int(action_idx)], context))
+        if action.ndim == 2 and action.shape[0] == 1:
+            action = action[0]
+
+        if action.ndim != 1:
+            raise ValueError(f"Invalid action returned from parser: shape={action.shape}")
+
+        return action
+
+    def _load_weights(self, path: Path, device: torch.device) -> None:
+        if not path.exists():
+            raise FileNotFoundError(
+                "Missing PPO policy checkpoint. Place your trained weights at "
+                f"{path.name} in the bot directory before launching the agent."
+            )
+
+        try:
+            state_dict = torch.load(path, map_location=device)
+        except Exception as exc:  # pragma: no cover - defensive logging
+            raise RuntimeError(f"Failed to load PPO weights from {path}: {exc}") from exc
+
+        self.policy.load_state_dict(state_dict)
